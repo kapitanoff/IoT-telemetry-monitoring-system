@@ -1,0 +1,183 @@
+<!DOCTYPE html>
+<html lang="ru">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Chicken Monitor</title>
+    <link rel="stylesheet" href="/static/style.css?v=2">
+    <script src="/static/chart.umd.min.js"></script>
+
+</head>
+<body>
+
+    <header>
+        <h1>Мониторинг температуры куриц</h1>
+        <div class="header-controls">
+            <div class="view-toggle">
+                <button id="btn-view-all" class="view-btn active">Все</button>
+                <button id="btn-view-groups" class="view-btn">По загонам</button>
+            </div>
+            <button id="btn-manage-groups" class="manage-groups-btn">Управление загонами</button>
+            <button id="btn-select-mode" class="manage-groups-btn">Выбрать</button>
+            <button id="btn-toggle-qos" class="view-btn">QoS</button>
+        </div>
+        <div class="legend" id="legend">
+            <span class="dot green"></span> <span id="legend-green">Норма</span>
+            <span class="dot yellow"></span> <span id="legend-yellow">Предупреждение</span>
+            <span class="dot red"></span> <span id="legend-red">Опасно</span>
+            <button id="btn-edit-thresholds" class="edit-thresholds-btn" title="Изменить пороги">&#9881;</button>
+        </div>
+        <span id="last-updated" class="last-updated"></span>
+    </header>
+
+    <div id="connection-banner" class="connection-banner hidden">Нет связи с сервером</div>
+
+    <div id="summary-bar" class="summary-bar hidden">
+        <button class="summary-chip red" id="summary-red" data-filter="red">
+            <span class="summary-icon">&#9888;</span> Опасно: <span id="summary-red-count">0</span>
+        </button>
+        <button class="summary-chip yellow" id="summary-yellow" data-filter="yellow">
+            <span class="summary-icon">&#9888;</span> Предупреждение: <span id="summary-yellow-count">0</span>
+        </button>
+        <button class="summary-chip green" id="summary-green" data-filter="green">
+            Норма: <span id="summary-green-count">0</span>
+        </button>
+        <button class="summary-chip reset hidden" id="summary-reset">Показать все</button>
+    </div>
+
+    <section id="qos-panel" class="qos-panel hidden">
+        <div class="qos-summary">
+            <div class="qos-stat">
+                <span class="qos-stat-label">Средняя задержка</span>
+                <span id="qos-avg-latency" class="qos-stat-value">— мс</span>
+            </div>
+            <div class="qos-stat">
+                <span class="qos-stat-label">P95 задержка</span>
+                <span id="qos-p95-latency" class="qos-stat-value">— мс</span>
+            </div>
+            <div class="qos-stat">
+                <span class="qos-stat-label">Потеря пакетов</span>
+                <span id="qos-loss-rate" class="qos-stat-value">— %</span>
+            </div>
+            <div class="qos-stat">
+                <span class="qos-stat-label">Уровень QoS</span>
+                <span id="qos-level" class="qos-stat-value">—</span>
+            </div>
+            <div class="qos-stat">
+                <span class="qos-stat-label">Всего сообщений</span>
+                <span id="qos-total-msg" class="qos-stat-value">—</span>
+            </div>
+        </div>
+        <div class="qos-charts">
+            <div class="qos-chart-wrap">
+                <h3>Задержка (мс)</h3>
+                <canvas id="qos-latency-chart"></canvas>
+            </div>
+        </div>
+    </section>
+
+    <div id="bulk-bar" class="bulk-bar hidden">
+        <span id="bulk-count">Выбрано: 0</span>
+        <select id="bulk-group-select">
+            <option value="">Без загона</option>
+        </select>
+        <button id="btn-bulk-assign">Назначить</button>
+        <button id="btn-bulk-cancel" class="bulk-cancel">Отмена</button>
+    </div>
+
+    <main>
+        <div id="grid" class="grid"></div>
+        <p id="empty-msg" class="empty-msg">Ожидание данных с датчиков...</p>
+        <div id="pagination" class="pagination hidden">
+            <button id="btn-prev" class="page-btn">&#8249;</button>
+            <span id="page-info">Страница 1 из 1</span>
+            <button id="btn-next" class="page-btn">&#8250;</button>
+        </div>
+    </main>
+
+    <!-- Модальное окно с графиком -->
+    <div id="modal" class="modal hidden">
+        <div class="modal-content">
+            <div class="modal-header">
+                <button id="modal-prev" class="modal-nav-btn" title="Предыдущая">&#8249;</button>
+                <h2 id="modal-title">Курица #</h2>
+                <button id="modal-next" class="modal-nav-btn" title="Следующая">&#8250;</button>
+                <button id="modal-close">&times;</button>
+            </div>
+            <div class="modal-group-selector">
+                <label for="modal-group-select">Загон:</label>
+                <select id="modal-group-select">
+                    <option value="">Без загона</option>
+                </select>
+                <button id="btn-delete-chicken" class="btn-delete-chicken" title="Удалить курицу">Удалить</button>
+            </div>
+            <div class="modal-info" id="modal-info"></div>
+            <div class="time-selector">
+                <button class="time-btn active" data-hours="1">1ч</button>
+                <button class="time-btn" data-hours="6">6ч</button>
+                <button class="time-btn" data-hours="24">24ч</button>
+                <button class="time-btn" data-hours="168">7д</button>
+                <button class="time-btn" data-hours="720">30д</button>
+                <button class="time-btn" data-hours="4320">6мес</button>
+                <button class="time-btn" data-hours="8760">1год</button>
+            </div>
+            <div class="chart-wrap">
+                <canvas id="tempChart"></canvas>
+            </div>
+        </div>
+    </div>
+
+    <!-- Модальное окно управления загонами -->
+    <div id="groups-modal" class="modal hidden">
+        <div class="modal-content groups-modal-content">
+            <div class="modal-header">
+                <h2>Управление загонами</h2>
+                <button id="groups-modal-close">&times;</button>
+            </div>
+            <div class="groups-create">
+                <input type="text" id="new-group-name" placeholder="Название нового загона" maxlength="50">
+                <button id="btn-create-group">Создать</button>
+            </div>
+            <div id="groups-list" class="groups-list"></div>
+        </div>
+    </div>
+
+    <!-- Модальное окно редактирования порогов -->
+    <div id="thresholds-modal" class="modal hidden">
+        <div class="modal-content thresholds-modal-content">
+            <div class="modal-header">
+                <h2>Пороги температуры</h2>
+                <button id="thresholds-modal-close">&times;</button>
+            </div>
+            <div class="thresholds-form">
+                <div class="threshold-row">
+                    <label for="inp-green-min">Норма от (°C):</label>
+                    <input type="number" id="inp-green-min" step="0.1">
+                </div>
+                <div class="threshold-row">
+                    <label for="inp-green-max">Норма до (°C):</label>
+                    <input type="number" id="inp-green-max" step="0.1">
+                </div>
+                <div class="threshold-row">
+                    <label for="inp-yellow-max">Предупреждение до (°C):</label>
+                    <input type="number" id="inp-yellow-max" step="0.1">
+                </div>
+                <div class="thresholds-preview" id="thresholds-preview">
+                    <span class="tp-zone tp-red-low">Опасно</span>
+                    <span class="tp-zone tp-green">Норма</span>
+                    <span class="tp-zone tp-yellow">Предупр.</span>
+                    <span class="tp-zone tp-red-high">Опасно</span>
+                </div>
+                <div class="thresholds-hint">
+                    Выше «Предупреждение до» или ниже «Норма от» — Опасно (красный)
+                </div>
+                <div id="thresholds-error" class="thresholds-error hidden"></div>
+                <button id="btn-save-thresholds">Сохранить</button>
+                <button id="btn-reset-thresholds" class="btn-reset-thresholds" type="button">Сброс к умолчаниям</button>
+            </div>
+        </div>
+    </div>
+
+    <script src="/static/app.js?v=2"></script>
+</body>
+</html>

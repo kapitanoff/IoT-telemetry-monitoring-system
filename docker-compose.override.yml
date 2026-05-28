@@ -1,0 +1,53 @@
+services:
+  mosquitto:
+    image: eclipse-mosquitto:2
+    restart: unless-stopped
+    ports:
+      - "1883:1883"
+    volumes:
+      - ./mosquitto:/mosquitto/config
+      - mosquitto_data:/mosquitto/data
+    healthcheck:
+      test: ["CMD-SHELL", "mosquitto_sub -t '$$SYS/#' -C 1 -u ${MQTT_USERNAME:-chicken} -P ${MQTT_PASSWORD:-chicken} -W 3 || exit 1"]
+      interval: 10s
+      timeout: 5s
+      retries: 3
+
+  backend:
+    depends_on:
+      mosquitto:
+        condition: service_healthy
+    environment:
+      MQTT_HOST: mosquitto
+    healthcheck:
+      test: ["CMD-SHELL", "python -c \"import urllib.request; urllib.request.urlopen('http://localhost:8000/api/qos/time', timeout=2)\""]
+      interval: 5s
+      timeout: 3s
+      retries: 5
+      start_period: 5s
+
+  emulator:
+    build:
+      context: .
+      dockerfile: emulator/Dockerfile
+    cap_add:
+      - NET_ADMIN
+    depends_on:
+      mosquitto:
+        condition: service_healthy
+      backend:
+        condition: service_healthy
+    command:
+      - "--broker=mosquitto"
+      - "--sensors=${EMU_SENSORS:-10}"
+      - "--qos=${EMU_QOS:-1}"
+      - "--interval=${EMU_INTERVAL:-5}"
+      - "--loss=${EMU_LOSS:-0}"
+      - "--username=${MQTT_USERNAME:-chicken}"
+      - "--password=${MQTT_PASSWORD:-chicken}"
+      - "--api-url=http://backend:8000"
+    profiles:
+      - emulator
+
+volumes:
+  mosquitto_data:
