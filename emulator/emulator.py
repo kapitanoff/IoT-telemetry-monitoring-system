@@ -143,7 +143,7 @@ def main():
     parser.add_argument("--interval", type=float, default=5.0, help="Интервал отправки в секундах (default: 5)")
     parser.add_argument("--qos", type=int, default=1, choices=[0, 1, 2], help="Уровень QoS MQTT (default: 1)")
     parser.add_argument("--loss", type=float, default=0.0, help="Вероятность потери пакета 0.0–1.0 (default: 0)")
-    parser.add_argument("--api-url", default="http://localhost:8000", help="URL бэкенда для калибровки часов")
+    parser.add_argument("--api-url", default="http://localhost:8000", help="URL серверной части для калибровки часов")
     args = parser.parse_args()
 
     # Калибровка часов между хостом и Docker-контейнером

@@ -14,6 +14,7 @@ const LATENCY_GOOD_MS = 50;
 const LATENCY_WARN_MS = 200;
 const LOSS_GOOD = 0.01;
 const LOSS_WARN = 0.05;
+const PAGE_SIZE_OPTIONS = [40, 60];
 
 // Пороги батареи (характеристика CR2032)
 const BATTERY_LEVELS = [
@@ -38,7 +39,7 @@ let selectedHours    = 1;      // выбранный период графика
 
 let currentPage      = 1;      // текущая страница
 let totalPages       = 1;      // всего страниц
-const perPage        = 20;     // куриц на странице
+let perPage          = normalizePageSize(localStorage.getItem('chicken-page-size')); // куриц на странице
 let renderedPage     = 0;      // последняя отрисованная страница
 
 let viewMode         = 'all';  // 'all' | 'groups'
@@ -47,10 +48,108 @@ let collapsedGroups  = new Set(); // ID свёрнутых секций
 
 let selectMode       = false;  // режим множественного выбора
 let selectedChickens = new Set(); // выбранные курицы
+let suppressClickChickenId = null; // click после длинного нажатия не должен снимать первый выбор
 
 let allChickensCache = [];     // кэш всех куриц для навигации
 let statusFilter     = null;   // фильтр по статусу (null = все)
 let consecutiveErrors = 0;     // счётчик ошибок подряд для баннера
+
+function normalizePageSize(value) {
+    const numeric = Number(value);
+    return PAGE_SIZE_OPTIONS.includes(numeric) ? numeric : 60;
+}
+
+function getGridMetrics(grid) {
+    const main = document.querySelector('main');
+    if (!grid || !main) return null;
+
+    const gridStyle = getComputedStyle(grid);
+    const mainStyle = getComputedStyle(main);
+    const gap = parseFloat(gridStyle.columnGap || gridStyle.gap) || 10;
+    const width = grid.clientWidth || main.clientWidth;
+    const paddingY =
+        (parseFloat(mainStyle.paddingTop) || 0) +
+        (parseFloat(mainStyle.paddingBottom) || 0);
+    const availableHeight = Math.max(1, main.clientHeight - paddingY);
+
+    return { gap, width, availableHeight };
+}
+
+function getMinCellSize() {
+    if (window.matchMedia('(max-width: 640px)').matches) return 104;
+    if (window.matchMedia('(max-width: 900px)').matches) return 112;
+    return 128;
+}
+
+function getGroupCellMaxSize() {
+    if (window.matchMedia('(max-width: 640px)').matches) return null;
+    if (window.matchMedia('(max-width: 900px)').matches) return 132;
+    return 160;
+}
+
+function applyGridColumns(grid, itemCount, fitHeight = false) {
+    if (!grid || itemCount <= 0) return;
+    const metrics = getGridMetrics(grid);
+    if (!metrics) return;
+
+    const { gap, width, availableHeight } = metrics;
+    const minCell = getMinCellSize();
+    const maxColumns = Math.max(1, Math.min(itemCount, Math.floor((width + gap) / (minCell + gap))));
+    let columns = maxColumns;
+
+    if (fitHeight) {
+        let bestColumns = maxColumns;
+        let bestCell = 0;
+        for (let c = 1; c <= maxColumns; c++) {
+            const rows = Math.ceil(itemCount / c);
+            const cellWidth = (width - gap * (c - 1)) / c;
+            const totalHeight = rows * cellWidth + gap * (rows - 1);
+            if (totalHeight <= availableHeight && cellWidth > bestCell) {
+                bestCell = cellWidth;
+                bestColumns = c;
+            }
+        }
+        columns = bestColumns;
+    }
+
+    grid.style.setProperty('--grid-cols', String(columns));
+    grid.classList.add('fit-grid');
+}
+
+function applyGroupGridColumns(grid, itemCount) {
+    if (!grid || itemCount <= 0) return;
+    const metrics = getGridMetrics(grid);
+    if (!metrics) return;
+
+    const { gap, width } = metrics;
+    const minCell = getMinCellSize();
+    const maxCell = getGroupCellMaxSize();
+    const targetCell = maxCell || minCell;
+    const columns = Math.max(1, Math.min(itemCount, Math.floor((width + gap) / (targetCell + gap))));
+    const fittedCell = Math.max(minCell, Math.floor((width - gap * (columns - 1)) / columns));
+
+    grid.style.setProperty('--grid-cols', String(columns));
+    if (maxCell) {
+        grid.style.setProperty('--grid-cell-size', `${Math.min(fittedCell, maxCell)}px`);
+        grid.classList.add('compact-grid');
+    } else {
+        grid.style.removeProperty('--grid-cell-size');
+        grid.classList.remove('compact-grid');
+    }
+    grid.classList.add('fit-grid');
+}
+
+function relayoutVisibleGrid() {
+    const grid = document.getElementById('grid');
+    if (!grid) return;
+    if (viewMode === 'groups') {
+        grid.querySelectorAll('.group-grid').forEach(groupGrid => {
+            applyGroupGridColumns(groupGrid, groupGrid.querySelectorAll('.cell').length);
+        });
+        return;
+    }
+    applyGridColumns(grid, grid.querySelectorAll('.cell').length, true);
+}
 
 // ─── Загрузка настроек порогов ──────────────────────────────
 
@@ -159,6 +258,12 @@ function createChickenCell(chicken) {
     `;
 
     cell.addEventListener('click', (e) => {
+        if (suppressClickChickenId === String(chicken.chicken_id)) {
+            suppressClickChickenId = null;
+            e.preventDefault();
+            return;
+        }
+
         if (selectMode) {
             e.preventDefault();
             toggleSelectChicken(chicken.chicken_id, cell);
@@ -171,7 +276,9 @@ function createChickenCell(chicken) {
 
 // ─── Загрузка и отрисовка сетки ──────────────────────────────
 
-async function loadChickens() {
+async function loadChickens(options = {}) {
+    const { preserveScroll = false } = options;
+
     // В режиме выбора не перерисовываем — только обновляем данные в существующих ячейках
     if (selectMode) {
         try {
@@ -190,7 +297,7 @@ async function loadChickens() {
     }
 
     if (viewMode === 'groups') {
-        await loadChickensGrouped();
+        await loadChickensGrouped({ preserveScroll });
         return;
     }
 
@@ -217,7 +324,10 @@ async function loadChickens() {
     if (statusFilter) {
         items = items.filter(c => c.status === statusFilter);
     }
-    items.sort((a, b) => (STATUS_PRIORITY[a.status] || 3) - (STATUS_PRIORITY[b.status] || 3));
+    items.sort((a, b) => (STATUS_PRIORITY[a.status] ?? 3) - (STATUS_PRIORITY[b.status] ?? 3));
+
+    const grid     = document.getElementById('grid');
+    const emptyMsg = document.getElementById('empty-msg');
 
     // Пагинация вручную
     const total = items.length;
@@ -225,9 +335,6 @@ async function loadChickens() {
     if (currentPage > totalPages) currentPage = totalPages;
     const start = (currentPage - 1) * perPage;
     const pageItems = items.slice(start, start + perPage);
-
-    const grid     = document.getElementById('grid');
-    const emptyMsg = document.getElementById('empty-msg');
 
     emptyMsg.style.display = total === 0 ? 'block' : 'none';
 
@@ -248,6 +355,8 @@ async function loadChickens() {
         updateCell(cell, c);
     });
 
+    applyGridColumns(grid, pageItems.length, true);
+
     // Удаляем ячейки, которых нет на текущей странице
     const validIds = new Set(pageItems.map(c => `cell-${c.chicken_id}`));
     Array.from(grid.querySelectorAll('.cell')).forEach(cell => {
@@ -260,7 +369,8 @@ async function loadChickens() {
 
 // ─── Загрузка по группам ────────────────────────────────────
 
-async function loadChickensGrouped() {
+async function loadChickensGrouped(options = {}) {
+    const { preserveScroll = false } = options;
     const groups = await loadGroups();
 
     let allData;
@@ -280,6 +390,8 @@ async function loadChickensGrouped() {
 
     const grid     = document.getElementById('grid');
     const emptyMsg = document.getElementById('empty-msg');
+    const main     = document.querySelector('main');
+    const previousScrollTop = preserveScroll && main ? main.scrollTop : null;
 
     emptyMsg.style.display = allData.total === 0 ? 'block' : 'none';
     document.getElementById('pagination').classList.add('hidden');
@@ -308,7 +420,7 @@ async function loadChickensGrouped() {
 
     // Сортируем внутри каждой группы по статусу
     const sortByStatus = arr => arr.sort((a, b) =>
-        (STATUS_PRIORITY[a.status] || 3) - (STATUS_PRIORITY[b.status] || 3));
+        (STATUS_PRIORITY[a.status] ?? 3) - (STATUS_PRIORITY[b.status] ?? 3));
 
     // Отрисовка секций для каждой группы
     groups.forEach(g => {
@@ -318,19 +430,42 @@ async function loadChickensGrouped() {
         const warnCount = chickens.filter(c => c.status === 'yellow').length;
         const section = createGroupSection(g.name, chickens, `group-${g.id}`, dangerCount, warnCount);
         grid.appendChild(section);
+        applyGroupGridColumns(section.querySelector('.group-grid'), chickens.length);
     });
 
     // Секция "Без загона"
     if (ungrouped.length > 0) {
-        const section = createGroupSection('Без загона', sortByStatus(ungrouped), 'ungrouped', 0, 0);
+        const sortedUngrouped = sortByStatus(ungrouped);
+        const dangerCount = sortedUngrouped.filter(c => c.status === 'red').length;
+        const warnCount = sortedUngrouped.filter(c => c.status === 'yellow').length;
+        const section = createGroupSection('Без загона', sortedUngrouped, 'ungrouped', dangerCount, warnCount);
         section.classList.add('ungrouped');
         grid.appendChild(section);
+        applyGroupGridColumns(section.querySelector('.group-grid'), ungrouped.length);
     }
+
+    if (previousScrollTop != null) {
+        restoreMainScroll(previousScrollTop);
+    }
+}
+
+function restoreMainScroll(scrollTop) {
+    const main = document.querySelector('main');
+    if (!main) return;
+
+    const restore = () => {
+        const maxScrollTop = Math.max(0, main.scrollHeight - main.clientHeight);
+        main.scrollTop = Math.min(scrollTop, maxScrollTop);
+    };
+
+    restore();
+    requestAnimationFrame(restore);
 }
 
 function createGroupSection(name, chickens, groupId, dangerCount, warnCount) {
     const section = document.createElement('div');
-    section.className = 'group-section';
+    const sectionStatus = dangerCount > 0 ? 'red' : warnCount > 0 ? 'yellow' : chickens.length > 0 ? 'green' : 'empty';
+    section.className = `group-section ${sectionStatus}`;
     section.dataset.groupId = groupId;
 
     // Восстанавливаем свёрнутое состояние
@@ -453,6 +588,27 @@ function renderPagination(total) {
     btnNext.disabled = currentPage >= totalPages;
 }
 
+function setPageSize(size) {
+    perPage = normalizePageSize(size);
+    localStorage.setItem('chicken-page-size', String(perPage));
+    document.querySelectorAll('.page-size-btn').forEach(btn => {
+        const active = Number(btn.dataset.size) === perPage;
+        btn.classList.toggle('active', active);
+        btn.setAttribute('aria-pressed', active ? 'true' : 'false');
+    });
+}
+
+document.querySelectorAll('.page-size-btn').forEach(btn => {
+    btn.addEventListener('click', async () => {
+        const size = normalizePageSize(btn.dataset.size);
+        if (size === perPage) return;
+        setPageSize(size);
+        currentPage = 1;
+        renderedPage = 0;
+        await loadChickens();
+    });
+});
+
 document.getElementById('btn-prev').addEventListener('click', async () => {
     if (currentPage > 1) {
         currentPage--;
@@ -492,6 +648,38 @@ document.getElementById('btn-view-groups').addEventListener('click', () => {
 });
 
 // ─── Модальное окно с графиком ───────────────────────────────
+
+function formatChartAxisLabel(timestamp, hours) {
+    const date = new Date(timestamp);
+    if (hours < 24) {
+        return date.toLocaleTimeString('ru-RU', { hour: '2-digit', minute: '2-digit' });
+    }
+    if (hours <= 168) {
+        return date.toLocaleString('ru-RU', {
+            day: '2-digit',
+            month: '2-digit',
+            hour: '2-digit',
+            minute: '2-digit',
+        });
+    }
+    if (hours <= 720) {
+        return date.toLocaleDateString('ru-RU', { day: '2-digit', month: '2-digit' });
+    }
+    return date.toLocaleDateString('ru-RU', { day: '2-digit', month: 'short' });
+}
+
+function getChartDisplayOptions(pointCount, hours) {
+    if (hours >= 720) {
+        return { maxTicksLimit: 8, pointRadius: 0, pointHoverRadius: 5, tension: 0.3 };
+    }
+    if (hours >= 168) {
+        return { maxTicksLimit: 8, pointRadius: 0, pointHoverRadius: 5, tension: 0.28 };
+    }
+    if (hours >= 24) {
+        return { maxTicksLimit: 9, pointRadius: pointCount > 80 ? 0 : 2, pointHoverRadius: 6, tension: 0.25 };
+    }
+    return { maxTicksLimit: 7, pointRadius: pointCount > 1000 ? 0 : pointCount > 300 ? 1 : 3, pointHoverRadius: 6, tension: 0.2 };
+}
 
 async function openModal(chickenId) {
     selectedChicken = chickenId;
@@ -612,13 +800,16 @@ async function loadChart(chickenId, hours) {
     });
 
     // Короткие метки для оси X
-    const labels = history.map(r => {
-        const d = new Date(r.timestamp);
-        return d.toLocaleTimeString('ru-RU', { hour: '2-digit', minute: '2-digit' });
-    });
+    const labels = history.map(r => formatChartAxisLabel(r.timestamp, hours));
 
     const temps = history.map(r => r.temperature);
     const voltages = history.map(r => r.voltage);
+    const displayOptions = getChartDisplayOptions(history.length, hours);
+    const tempMinValue = temps.length ? Math.min(...temps) : 40;
+    const tempMaxValue = temps.length ? Math.max(...temps) : 42;
+    const yPadding = hours >= 720 ? 0.35 : hours >= 168 ? 0.25 : 0.18;
+    const yMin = Math.floor((tempMinValue - yPadding) * 10) / 10;
+    const yMax = Math.ceil((tempMaxValue + yPadding) * 10) / 10;
 
     // Удаляем старый график перед созданием нового
     if (chartInstance) chartInstance.destroy();
@@ -628,8 +819,8 @@ async function loadChart(chickenId, hours) {
     if (history.length === 0) {
         infoEl.textContent = 'Нет данных за выбранный период';
     } else {
-        const min = Math.min(...temps).toFixed(1);
-        const max = Math.max(...temps).toFixed(1);
+        const min = tempMinValue.toFixed(1);
+        const max = tempMaxValue.toFixed(1);
         const avg = (temps.reduce((a, b) => a + b, 0) / temps.length).toFixed(1);
         infoEl.textContent = `Точек: ${history.length}  •  Мин: ${min}°C  •  Макс: ${max}°C  •  Среднее: ${avg}°C`;
     }
@@ -646,9 +837,9 @@ async function loadChart(chickenId, hours) {
                 borderColor: '#e94560',
                 backgroundColor: 'rgba(233, 69, 96, 0.08)',
                 fill: true,
-                tension: 0.4,
-                pointRadius: history.length > 200 ? 0 : history.length > 50 ? 2 : 4,
-                pointHoverRadius: 7,
+                tension: displayOptions.tension,
+                pointRadius: displayOptions.pointRadius,
+                pointHoverRadius: displayOptions.pointHoverRadius,
                 pointBackgroundColor: '#e94560',
                 pointBorderColor: '#fff',
                 pointBorderWidth: 1
@@ -686,10 +877,18 @@ async function loadChart(chickenId, hours) {
             },
             scales: {
                 x: {
-                    ticks: { color: '#666', maxTicksLimit: 10 },
+                    ticks: {
+                        color: '#666',
+                        maxTicksLimit: displayOptions.maxTicksLimit,
+                        autoSkip: true,
+                        maxRotation: 0,
+                        minRotation: 0,
+                    },
                     grid:  { color: '#1e1e3a' }
                 },
                 y: {
+                    min: yMin,
+                    max: yMax,
                     ticks: { color: '#666' },
                     grid:  { color: '#1e1e3a' }
                 }
@@ -1023,7 +1222,10 @@ document.getElementById('grid').addEventListener('pointerdown', (e) => {
     longPressTimer = setTimeout(() => {
         enterSelectMode();
         const id = cell.dataset.chickenId;
-        if (id) toggleSelectChicken(id, cell);
+        if (id) {
+            suppressClickChickenId = String(id);
+            toggleSelectChicken(id, cell);
+        }
     }, LONG_PRESS_MS);
 });
 document.getElementById('grid').addEventListener('pointerup', () => clearTimeout(longPressTimer));
@@ -1054,6 +1256,14 @@ document.getElementById('btn-select-mode').addEventListener('click', () => {
     } else {
         enterSelectMode();
     }
+});
+
+let resizeTimer = null;
+window.addEventListener('resize', () => {
+    clearTimeout(resizeTimer);
+    resizeTimer = setTimeout(() => {
+        relayoutVisibleGrid();
+    }, 180);
 });
 
 // ─── QoS-панель ─────────────────────────────────────────────
@@ -1200,10 +1410,11 @@ function renderQosChart(data) {
 
 // ─── Запуск ──────────────────────────────────────────────────
 
+setPageSize(perPage);
 loadSettings();
 loadGroups().then(() => loadChickens());
 setInterval(() => {
     if (document.hidden) return;
-    loadChickens();
+    loadChickens({ preserveScroll: true });
     if (qosPanelVisible) loadQosData();
 }, REFRESH_INTERVAL_MS);

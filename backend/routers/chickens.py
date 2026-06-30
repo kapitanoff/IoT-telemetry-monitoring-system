@@ -10,7 +10,7 @@ from utils import get_status
 from config import settings
 
 MAX_ALL_RESULTS = 500
-MAX_HISTORY_POINTS = 5000
+MAX_HISTORY_POINTS = 20000
 
 router = APIRouter()
 
@@ -26,6 +26,52 @@ class SettingsUpdate(BaseModel):
     temp_green_min: float
     temp_green_max: float
     temp_yellow_max: float
+
+
+def _as_utc(value):
+    if value is None:
+        return None
+    if value.tzinfo is None:
+        return value.replace(tzinfo=timezone.utc)
+    return value.astimezone(timezone.utc)
+
+
+def _history_window_end(db: Session, chicken_id: str):
+    latest_raw = (
+        db.query(func.max(TemperatureReading.recorded_at))
+        .filter(TemperatureReading.chicken_id == chicken_id)
+        .scalar()
+    )
+    latest_agg = (
+        db.query(func.max(AggregatedReading.bucket))
+        .filter(AggregatedReading.chicken_id == chicken_id)
+        .scalar()
+    )
+
+    candidates = [_as_utc(latest_raw), _as_utc(latest_agg)]
+    candidates = [value for value in candidates if value is not None]
+    return max(candidates) if candidates else datetime.now(timezone.utc)
+
+
+def _format_history_rows(rows):
+    return [
+        {
+            "timestamp": r.timestamp.isoformat(),
+            "temperature": round(r.temperature, 2),
+            "voltage": round(r.voltage, 2) if r.voltage is not None else None,
+        }
+        for r in rows
+        if r.temperature is not None
+    ]
+
+
+def _merge_history_rows(*row_groups):
+    merged = {}
+    for rows in row_groups:
+        for row in rows:
+            merged[row.timestamp] = row
+    combined = sorted(merged.values(), key=lambda r: r.timestamp)
+    return combined[-MAX_HISTORY_POINTS:]
 
 
 @router.get("/settings")
@@ -128,12 +174,17 @@ def get_history(
     hours: int = Query(24, ge=1, le=8760),
     db: Session = Depends(get_db),
 ):
-    since = datetime.now(timezone.utc) - timedelta(hours=hours)
+    window_end = _history_window_end(db, chicken_id)
+    since = window_end - timedelta(hours=hours)
 
     # До 24 часов — каждая сырая точка
     if hours <= 24:
         readings = (
-            db.query(TemperatureReading)
+            db.query(
+                TemperatureReading.recorded_at.label("timestamp"),
+                TemperatureReading.temperature.label("temperature"),
+                TemperatureReading.voltage.label("voltage"),
+            )
             .filter(
                 TemperatureReading.chicken_id == chicken_id,
                 TemperatureReading.recorded_at >= since
@@ -142,14 +193,25 @@ def get_history(
             .limit(MAX_HISTORY_POINTS)
             .all()
         )
-        return [
-            {
-                "timestamp": r.recorded_at.isoformat(),
-                "temperature": round(r.temperature, 2),
-                "voltage": r.voltage
-            }
-            for r in readings
-        ]
+        if readings:
+            return _format_history_rows(readings)
+
+        agg = (
+            db.query(
+                AggregatedReading.bucket.label("timestamp"),
+                AggregatedReading.avg_temp.label("temperature"),
+                AggregatedReading.avg_voltage.label("voltage"),
+            )
+            .filter(
+                AggregatedReading.chicken_id == chicken_id,
+                AggregatedReading.resolution == "hour",
+                AggregatedReading.bucket >= since,
+            )
+            .order_by(AggregatedReading.bucket.asc())
+            .limit(MAX_HISTORY_POINTS)
+            .all()
+        )
+        return _format_history_rows(agg)
 
     # До 7 дней — агрегируем сырые данные по часам (они ещё не удалены)
     if hours <= 168:
@@ -184,26 +246,10 @@ def get_history(
             .all()
         )
         # Объединяем, убирая дубликаты по timestamp
-        seen = set()
-        combined = []
-        for r in results:
-            seen.add(r.timestamp)
-            combined.append(r)
-        for r in agg:
-            if r.timestamp not in seen:
-                combined.append(r)
-        combined.sort(key=lambda r: r.timestamp)
-        return [
-            {
-                "timestamp": r.timestamp.isoformat(),
-                "temperature": round(r.temperature, 2),
-                "voltage": round(r.voltage, 2) if r.voltage else None
-            }
-            for r in combined
-        ]
+        return _format_history_rows(_merge_history_rows(agg, results))
 
     # Больше 7 дней — из агрегированных таблиц
-    resolution = "hour" if hours <= 720 else "day"
+    resolutions = ["hour"] if hours <= 720 else ["day"]
     results = (
         db.query(
             AggregatedReading.bucket.label("timestamp"),
@@ -212,20 +258,30 @@ def get_history(
         )
         .filter(
             AggregatedReading.chicken_id == chicken_id,
-            AggregatedReading.resolution == resolution,
+            AggregatedReading.resolution.in_(resolutions),
             AggregatedReading.bucket >= since,
         )
         .order_by(AggregatedReading.bucket.asc())
+        .limit(MAX_HISTORY_POINTS)
         .all()
     )
-    return [
-        {
-            "timestamp": r.timestamp.isoformat(),
-            "temperature": round(r.temperature, 2),
-            "voltage": round(r.voltage, 2) if r.voltage else None
-        }
-        for r in results
-    ]
+    if not results and hours > 720:
+        results = (
+            db.query(
+                AggregatedReading.bucket.label("timestamp"),
+                AggregatedReading.avg_temp.label("temperature"),
+                AggregatedReading.avg_voltage.label("voltage"),
+            )
+            .filter(
+                AggregatedReading.chicken_id == chicken_id,
+                AggregatedReading.resolution == "hour",
+                AggregatedReading.bucket >= since,
+            )
+            .order_by(AggregatedReading.bucket.asc())
+            .limit(MAX_HISTORY_POINTS)
+            .all()
+        )
+    return _format_history_rows(results)
 
 
 @router.delete("/chickens/{chicken_id}")

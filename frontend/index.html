@@ -4,7 +4,7 @@
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <title>Chicken Monitor</title>
-    <link rel="stylesheet" href="/static/style.css?v=2">
+    <link rel="stylesheet" href="/static/style.css?v=3">
     <script src="/static/chart.umd.min.js"></script>
 
 </head>
@@ -20,6 +20,11 @@
             <button id="btn-manage-groups" class="manage-groups-btn">Управление загонами</button>
             <button id="btn-select-mode" class="manage-groups-btn">Выбрать</button>
             <button id="btn-toggle-qos" class="view-btn">QoS</button>
+            <div class="page-size-toggle" aria-label="Ячеек на странице">
+                <span>На странице</span>
+                <button class="page-size-btn" type="button" data-size="40">40</button>
+                <button class="page-size-btn" type="button" data-size="60">60</button>
+            </div>
         </div>
         <div class="legend" id="legend">
             <span class="dot green"></span> <span id="legend-green">Норма</span>
@@ -178,6 +183,6 @@
         </div>
     </div>
 
-    <script src="/static/app.js?v=2"></script>
+    <script src="/static/app.js?v=3"></script>
 </body>
 </html>
