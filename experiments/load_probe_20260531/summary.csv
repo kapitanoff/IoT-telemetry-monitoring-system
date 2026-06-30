@@ -1,0 +1,5 @@
+sensors,qos,avg_latency_ms,p95_latency_ms,packet_loss_percent,total_messages,scenario_dir,screenshot
+200,1,42.91,82.81,0.00,24544,200_qos1_200sensors,200_qos1_200sensors/image200.png
+300,1,637.98,3442.91,0.00,36532,300_qos1_300sensors,300_qos1_300sensors/image300.png
+350,1,410.64,2227.62,0.00,42562,350_qos1_350sensors,350_qos1_350sensors/image350.png
+400,1,6641.42,7663.55,1.02,47287,400_qos1_400sensors,400_qos1_400sensors/image400.png
